@@ -14,6 +14,7 @@ import { RetryPolicy } from "@langchain/langgraph"
 
 import { AmplifyClientWrapper, getLangChainMessageTextContent, stringifyLimitStringLength } from '../utils/amplifyUtils'
 import { publishResponseStreamChunk, updateChatSession } from '../graphql/mutations'
+import { RateLimiter } from '../../../src/utils/rateLimiter';
 
 import { Calculator } from "@langchain/community/tools/calculator";
 
@@ -29,6 +30,7 @@ const PlanStepSchema = z.object({
     toolCalls: z.array(z.any()).optional(),
     result: z.string().optional()
 });
+
 
 type PlanStep = z.infer<typeof PlanStepSchema>;
 
@@ -85,6 +87,9 @@ export const handler: Schema["invokePlanAndExecuteAgent"]["functionHandler"] = a
     // console.log('Amplify env: ', env)
     // console.log('process.env: ', process.env)
 
+    // Get rate limit from environment variable
+    const rateLimit = process.env.RATE_LIMIT ? parseInt(process.env.RATE_LIMIT) : 0;
+    const rateLimiter = RateLimiter.getInstance(rateLimit);
 
     if (!(event.arguments.chatSessionId)) throw new Error("Event does not contain chatSessionId");
     if (!event.identity) throw new Error("Event does not contain identity");
@@ -130,6 +135,7 @@ export const handler: Schema["invokePlanAndExecuteAgent"]["functionHandler"] = a
             plan: chatSession?.planSteps?.map(step => JSON.parse(step || "") as PlanStep),
             pastSteps: chatSession?.pastSteps?.map(step => JSON.parse(step || "") as PlanStep),
         }
+
 
         // Select the model to use for the executor agent
         const agentModel = new ChatBedrockConverse({
@@ -284,6 +290,7 @@ export const handler: Schema["invokePlanAndExecuteAgent"]["functionHandler"] = a
                     Once you have a result for this task, respond with that result.
                     `)],
             };
+            await rateLimiter.waitForRateLimit();
             const { messages } = await agentExecutor.invoke(inputs, config);
             const resultText = getLangChainMessageTextContent(messages.slice(-1)[0]) || ""
             console.log("Execute Step Complete. Result Text:\n", resultText)
@@ -340,6 +347,7 @@ export const handler: Schema["invokePlanAndExecuteAgent"]["functionHandler"] = a
                 let newPlan: { steps: PlanStep[] }
                 for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
                     try {
+                        await rateLimiter.waitForRateLimit();
                         newPlan = await replanner
                             .withConfig({
                                 callbacks: [customHandler],
@@ -447,6 +455,7 @@ export const handler: Schema["invokePlanAndExecuteAgent"]["functionHandler"] = a
             state: typeof PlanExecuteState.State,
             config: RunnableConfig,
         ): Promise<Partial<typeof PlanExecuteState.State>> {
+            await rateLimiter.waitForRateLimit();
             const response = await responder
                 .withConfig({
                     callbacks: [customHandler],
